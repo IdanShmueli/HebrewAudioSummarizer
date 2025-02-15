@@ -12,9 +12,9 @@
 2025-02-15 17:47:34,423 - INFO - [transcribe.py:639] - Saved checkpoint for declaration_of_independence.mkv at position 0:01:54
 2025-02-15 17:47:34,424 - INFO - [transcribe.py:872] - Successfully split text into 1 chunks
 2025-02-15 17:47:42,811 - INFO - [_client.py:1025] - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
-2025-02-15 17:47:42,832 - INFO - [transcribe.py:1469] - Saved raw transcription to C:\Users\idans\OneDrive\Desktop\New folder (2)\output\declaration_of_independence.mkv_raw.txt
-2025-02-15 17:47:42,833 - INFO - [transcribe.py:1484] - Saved processed output to C:\Users\idans\OneDrive\Desktop\New folder (2)\output\declaration_of_independence.mkv_processed.txt
-2025-02-15 17:47:42,834 - INFO - [transcribe.py:1515] - Created full report at C:\Users\idans\OneDrive\Desktop\New folder (2)\output\declaration_of_independence.mkv_report.txt
-2025-02-15 17:47:42,835 - INFO - [transcribe.py:665] - Deleted checkpoint for בן גוריון - הכרזת עצמאות מדינת ישראל-VlOGvqSSekc.mkv
+2025-02-15 17:47:42,832 - INFO - [transcribe.py:1469] - Saved raw transcription to C:\ivrit-ai-whisper-claude-transcriber-hakochav-v1.0.0\output\declaration_of_independence.mkv_raw.txt
+2025-02-15 17:47:42,833 - INFO - [transcribe.py:1484] - Saved processed output to C:\ivrit-ai-whisper-claude-transcriber-hakochav-v1.0.0\output\declaration_of_independence.mkv_processed.txt
+2025-02-15 17:47:42,834 - INFO - [transcribe.py:1515] - Created full report at C:\ivrit-ai-whisper-claude-transcriber-hakochav-v1.0.0\output\declaration_of_independence.mkv_report.txt
+2025-02-15 17:47:42,835 - INFO - [transcribe.py:665] - Deleted checkpoint for declaration_of_independence.mkv
 2025-02-15 17:47:42,838 - INFO - [transcribe.py:2277] - Directory processing completed
 2025-02-15 17:47:42,905 - INFO - [transcribe.py:2424] - Cleanup completed
