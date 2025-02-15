@@ -26,7 +26,7 @@ The system operates through several coordinated components:
 
 ## Sample Output
 
-The system includes a sample transcription of Israel's Declaration of Independence ([View Original Video](https://www.youtube.com/watch?v=VlOGvqSSekc)), demonstrating all output formats and system capabilities. A detailed analysis and explanation of this sample can be found in the `sample_output/README.md` file.
+The system includes a sample transcription of [Israel's Declaration of Independence](https://www.youtube.com/watch?v=VlOGvqSSekc), demonstrating all output formats and system capabilities. A detailed analysis and explanation of this sample can be found in the `sample_output/README.md` file.
 
 ## System Requirements
 
