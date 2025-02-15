@@ -1,4 +1,5 @@
-# ivrit-ai-whisper-claude-transcriber
+# Hebrew Audio/Video Transcription System
+
 A sophisticated audio/video transcription system designed for Hebrew language processing, leveraging the ivrit-ai/faster-whisper-v2-d4 model with Claude AI text enhancement.
 
 **Original model**: [ivrit-ai/faster-whisper-v2-d4](https://huggingface.co/ivrit-ai/faster-whisper-v2-d4)  
