@@ -14,6 +14,9 @@ import threading
 import contextlib
 import subprocess
 import anthropic
+import gc
+import signal
+import re
 from rich.progress import (
     Progress,
     SpinnerColumn,
@@ -31,12 +34,9 @@ from rich.table import Table
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, List, Set, Tuple, Any, Union
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from functools import wraps
-import gc
-import signal
 from tqdm import tqdm
-import re
 
 # Configure rich console 
 console = Console()
@@ -232,12 +232,6 @@ def create_progress_table() -> Table:
     table.add_column("ETA")
     return table
 
-import asyncio
-import logging
-import traceback
-from pathlib import Path
-from typing import List, Dict, Any, Optional
-
 class EnhancedWhisperModel:
     """Enhanced Whisper model wrapper with progress tracking and error handling"""
     
@@ -365,160 +359,6 @@ class EnhancedWhisperModel:
         Returns:
             Optional[List[Dict[str, Any]]]: List of transcription segments or None if failed
         """
-        try:
-            # Validate file
-            if not file_path.exists():
-                raise FileNotFoundError(f"File not found: {file_path}")
-                
-            if file_path.stat().st_size == 0:
-                raise ValueError(f"Empty file: {file_path}")
-            
-            # Update progress
-            progress.current_action = "Analyzing audio file"
-            self.progress_tracker.update_progress(
-                progress.filename,
-                status="processing",
-                current_action=progress.current_action
-            )
-            
-            # Clear GPU memory before transcription
-            self.clear_gpu_memory()
-            
-            # Get file duration
-            duration = self.progress_tracker.get_file_duration(file_path)
-            progress.total_duration = duration
-            
-            # Run transcription in a separate thread
-            transcription_result = await asyncio.to_thread(
-                self._transcribe_sync, 
-                str(file_path),
-                progress
-            )
-
-            if transcription_result is None:
-                raise RuntimeError("Transcription failed")
-
-            segments, info = transcription_result
-            
-            # Process and validate segments
-            processed_segments = []
-            last_end = 0.0  # Track segment continuity
-            
-            for segment in segments:
-                # Validate segment timing
-                if segment.start < 0 or segment.end <= segment.start:
-                    logging.warning(f"Invalid segment timing: start={segment.start}, end={segment.end}")
-                    continue
-                    
-                # Check for gaps
-                if segment.start - last_end > 1.0:  # Gap larger than 1 second
-                    logging.warning(f"Gap detected between segments: {last_end:.2f} -> {segment.start:.2f}")
-                
-                # Update tracking
-                last_end = segment.end
-                
-                # Create segment data
-                segment_data = {
-                    'start': float(segment.start),
-                    'end': float(segment.end),
-                    'text': segment.text.strip()
-                }
-                
-                # Validate text
-                if not segment_data['text']:
-                    logging.warning(f"Empty segment text at {segment_data['start']:.2f}")
-                    continue
-                
-                processed_segments.append(segment_data)
-                
-                # Update progress
-                progress.current_position = segment.end
-                progress.processed_duration = segment.end
-                progress.current_action = f"Processing segment at {segment.end:.2f}s"
-                
-                self.progress_tracker.update_progress(
-                    progress.filename,
-                    current_position=progress.current_position,
-                    processed_duration=progress.processed_duration,
-                    current_action=progress.current_action
-                )
-            
-            # Clear GPU memory after transcription
-            self.clear_gpu_memory()
-            
-            return processed_segments
-            
-        except Exception as e:
-            logging.error(f"Error transcribing file {file_path}: {str(e)}")
-            logging.error(traceback.format_exc())
-            progress.error_count += 1
-            self.progress_tracker.update_progress(
-                progress.filename,
-                error_count=progress.error_count,
-                status="error"
-            )
-            return None    
-    def __init__(self, model_name: str, progress_tracker: ProgressTracker):
-        self.model_name = model_name
-        self.progress_tracker = progress_tracker
-        self.model = None
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.initialize_model()
-    
-    def initialize_model(self):
-        """Initialize the Whisper model with enhanced error handling"""
-        try:
-            logging.info(f"Initializing Whisper model '{self.model_name}' on {self.device}")
-            
-            # Clear any existing CUDA memory
-            if self.device == "cuda":
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-            
-            self.model = faster_whisper.WhisperModel(
-                self.model_name,
-                device=self.device,
-                compute_type="float16" if self.device == "cuda" else "int8",
-                cpu_threads=4,
-                num_workers=1
-            )
-            
-            # Verify model initialization
-            if not self.model:
-                raise RuntimeError("Model initialization failed")
-                
-            logging.info("Model initialized successfully")
-            
-        except Exception as e:
-            logging.error(f"Error initializing model: {str(e)}")
-            raise
-
-    def clear_gpu_memory(self):
-        """Clear GPU memory safely with verification"""
-        if self.device == "cuda":
-            try:
-                # Synchronize before cleanup
-                torch.cuda.synchronize()
-                
-                # Clear memory caches
-                torch.cuda.empty_cache()
-                
-                # Force garbage collection
-                gc.collect()
-                
-                # Verify cleanup
-                allocated = torch.cuda.memory_allocated()
-                if allocated > 0:
-                    logging.warning(f"GPU memory still allocated: {allocated/1024**2:.2f}MB")
-                    
-                # Final synchronization
-                torch.cuda.synchronize()
-                
-            except Exception as e:
-                logging.error(f"Error clearing GPU memory: {str(e)}")
-
-    async def transcribe_file(self, file_path: Path, progress: TranscriptionProgress) -> Optional[List[Dict[str, Any]]]:
-        """Transcribe an audio file with enhanced error handling and memory management"""
         try:
             # Validate file
             if not file_path.exists():
@@ -753,6 +593,7 @@ class TextProcessor:
     CHUNK_MAX_SIZE: int = 2000
     OVERLAP_SIZE: int = 100
     
+    # Claude prompt template
     CLAUDE_PROMPT: str = """As a content specialist, create a detailed and comprehensive summary of this lecture segment in Hebrew. This is part {chunk_number} out of {total_chunks}.
 
 <original_text>
@@ -777,8 +618,26 @@ Guidelines for the summary:
 - Use proper terminology
 - Present cause-and-effect relationships clearly
 
-Format your response with:
+Format your summary using Markdown syntax. Here are some examples of Markdown formatting you should use:
+```markdown
+# Main Header
+
+## Subheader
+
+- Bullet point 1
+- Bullet point 2
+  - Sub-bullet point
+
+1. Numbered list item 1
+2. Numbered list item 2
+
+**Bold text** for emphasis
+```
+
+Create the comprehensive summary in Hebrew using Markdown formatting:
 <improved_text>
+
+</improved_text>
 """
 
     def __init__(self, api_key: str, progress_tracker: ProgressTracker):
@@ -796,6 +655,8 @@ Format your response with:
             raise ValueError("Invalid API key provided")
         self.client = anthropic.Client(api_key=api_key)
         self.progress_tracker = progress_tracker
+        # Store processed chunks for reporting
+        self.chunk_results = {}
 
     def split_into_chunks(self, text: str) -> List[str]:
         """
@@ -941,6 +802,15 @@ Format your response with:
                 if not improved_text:
                     raise ValueError("Empty improved text extracted")
                 
+                # Store the raw and processed chunks for report
+                if progress.filename not in self.chunk_results:
+                    self.chunk_results[progress.filename] = {}
+                
+                self.chunk_results[progress.filename][chunk_number] = {
+                    'raw': chunk,
+                    'processed': improved_text
+                }
+                
                 return improved_text
                 
             except Exception as e:
@@ -976,454 +846,6 @@ Format your response with:
             text = text.strip()
             if not text:
                 raise ValueError("Empty text provided")
-            
-            # Split into chunks
-            chunks = self.split_into_chunks(text)
-            if not chunks:
-                raise ValueError("No valid chunks created")
-            
-            # Process chunks
-            processed_chunks = []
-            for i, chunk in enumerate(chunks, 1):
-                result = await self.process_chunk(chunk, i, len(chunks), progress)
-                if result:
-                    processed_chunks.append(result)
-                else:
-                    logging.error(f"Failed to process chunk {i}")
-            
-            if not processed_chunks:
-                raise ValueError("No chunks were successfully processed")
-            
-            # Combine results
-            return '\n\n'.join(processed_chunks)
-            
-        except Exception as e:
-            logging.error(f"Error in process_text: {str(e)}")
-            return None  
-  
-    def __init__(self, api_key: str, progress_tracker: ProgressTracker):
-        """Initialize with API key and progress tracker"""
-        if not api_key or not isinstance(api_key, str):
-            raise ValueError("Invalid API key provided")
-        self.client = anthropic.Client(api_key=api_key)
-        self.progress_tracker = progress_tracker
-
-    async def process_chunk(self, chunk: str, chunk_number: int, total_chunks: int, progress: TranscriptionProgress) -> Optional[str]:
-        """Process a single chunk with comprehensive error handling"""
-        for attempt in range(1, self.MAX_RETRIES + 1):
-            try:
-                # Update progress
-                progress.current_chunk = chunk_number
-                progress.total_chunks = total_chunks
-                progress.current_action = f"Processing chunk {chunk_number}/{total_chunks}"
-                self.progress_tracker.update_progress(
-                    progress.filename,
-                    current_chunk=chunk_number,
-                    total_chunks=total_chunks,
-                    current_action=progress.current_action
-                )
-                
-                # Validate input
-                if not isinstance(chunk, str) or not chunk.strip():
-                    raise ValueError("Invalid or empty chunk provided")
-
-                # Prepare request
-                prompt = self.CLAUDE_PROMPT.format(
-                    chunk_number=chunk_number,
-                    total_chunks=total_chunks,
-                    transcribed_text=chunk
-                )
-                
-                # Make API request - using sync version and running in thread pool
-                response = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: self.client.messages.create(
-                        model="claude-3-5-sonnet-20241022",
-                        max_tokens=8192,
-                        messages=[{"role": "user", "content": prompt}]
-                    )
-                )
-                
-                # Extract content correctly from the Message object
-                if not hasattr(response, 'content') or not response.content:
-                    raise ValueError("Response missing content")
-                
-                # Get the first content item's text
-                content = response.content[0].text if isinstance(response.content, list) else response.content
-                
-                if not isinstance(content, str):
-                    raise TypeError(f"Unexpected content type: {type(content)}")
-
-                # Extract text between improved_text tags
-                match = re.search(r'<improved_text>\s*(.*?)(?=<|$)', content, re.DOTALL | re.IGNORECASE)
-                if not match:
-                    raise ValueError("Failed to find improved_text tags in response")
-                
-                improved_text = match.group(1).strip()
-                if not improved_text:
-                    raise ValueError("Empty improved text extracted")
-                
-                # Success
-                return improved_text
-                
-            except Exception as e:
-                logging.error(f"Error processing chunk {chunk_number} (attempt {attempt}/{self.MAX_RETRIES}): {str(e)}")
-                progress.error_count += 1
-                self.progress_tracker.update_progress(
-                    progress.filename,
-                    error_count=progress.error_count
-                )
-                
-                if attempt < self.MAX_RETRIES:
-                    await asyncio.sleep(self.RETRY_DELAY)
-                    continue
-                
-                return None
-
-    async def process_text(self, text: str, progress: TranscriptionProgress) -> Optional[str]:
-        """Process complete text with chunking and progress tracking"""
-        try:
-            # Validate and clean text
-            if not isinstance(text, str):
-                raise TypeError(f"Expected string, got {type(text)}")
-            
-            text = text.strip()
-            if not text:
-                raise ValueError("Empty text provided")
-            
-            # Split into chunks
-            chunks = self.split_into_chunks(text)
-            if not chunks:
-                raise ValueError("No valid chunks created")
-            
-            # Process chunks
-            processed_chunks = []
-            for i, chunk in enumerate(chunks, 1):
-                result = await self.process_chunk(chunk, i, len(chunks), progress)
-                if result:
-                    processed_chunks.append(result)
-                else:
-                    logging.error(f"Failed to process chunk {i}")
-            
-            if not processed_chunks:
-                raise ValueError("No chunks were successfully processed")
-            
-            # Combine results
-            return '\n\n'.join(processed_chunks)
-            
-        except Exception as e:
-            logging.error(f"Error in process_text: {str(e)}")
-            return None
-
-def split_into_chunks(self, text: str) -> List[str]:
-    """
-    Split text into appropriately sized chunks with comprehensive validation and error handling.
-    
-    Args:
-        text (str): The input text to be split into chunks
-        
-    Returns:
-        List[str]: List of text chunks, each between CHUNK_MIN_SIZE and CHUNK_MAX_SIZE
-        
-    Raises:
-        TypeError: If input is not a string
-        ValueError: If input is empty or invalid
-    """
-    try:
-        # Input validation
-        if not isinstance(text, str):
-            raise TypeError(f"Expected string input, got {type(text)}")
-        
-        text = text.strip()
-        if not text:
-            raise ValueError("Empty text provided")
-
-        chunks = []
-        current_pos = 0
-        text_length = len(text)
-
-        while current_pos < text_length:
-            # Calculate potential chunk end
-            chunk_end = min(current_pos + self.CHUNK_MAX_SIZE, text_length)
-            
-            # If not at text end, look for a proper sentence boundary
-            if chunk_end < text_length:
-                # Look ahead for sentence ending punctuation
-                look_ahead = text[chunk_end:min(chunk_end + 100, text_length)]
-                
-                # Check for multiple types of sentence endings
-                for punct in ['.', '!', '?', '।', '۔']:
-                    next_punct = look_ahead.find(punct)
-                    if next_punct != -1:
-                        chunk_end = chunk_end + next_punct + 1
-                        break
-                
-                # If no punctuation found, look for other natural breaks
-                if chunk_end == current_pos + self.CHUNK_MAX_SIZE:
-                    # Try to break at last space to avoid word splitting
-                    last_space = text[current_pos:chunk_end].rfind(' ')
-                    if last_space != -1:
-                        chunk_end = current_pos + last_space + 1
-
-            # Extract and validate chunk
-            chunk = text[current_pos:chunk_end].strip()
-            
-            # Only add chunks that meet minimum size requirement
-            if len(chunk) >= self.CHUNK_MIN_SIZE:
-                chunks.append(chunk)
-                # Log chunk creation for debugging
-                logging.debug(f"Created chunk of length {len(chunk)}")
-            else:
-                logging.warning(f"Skipping chunk of length {len(chunk)} < {self.CHUNK_MIN_SIZE}")
-            
-            # Break if we've reached the end
-            if chunk_end >= text_length:
-                break
-            
-            # Update position with overlap
-            current_pos = chunk_end - self.OVERLAP_SIZE
-            
-            # Prevent infinite loop
-            if current_pos >= text_length or current_pos <= 0:
-                break
-
-        # Validate results
-        if not chunks:
-            logging.error("No valid chunks were created")
-            return []
-            
-        logging.info(f"Successfully split text into {len(chunks)} chunks")
-        return chunks
-        
-    except Exception as e:
-        logging.error(f"Error in split_into_chunks: {str(e)}")
-        # In case of any error, return empty list
-        return []
-
-        try:
-            if not isinstance(text, str):
-                raise TypeError(f"Expected string, got {type(text)}")
-            
-            text = text.strip()
-            if not text:
-                raise ValueError("Empty text provided")
-
-            chunks = []
-            current_pos = 0
-            text_length = len(text)
-
-            while current_pos < text_length:
-                # Find chunk end
-                chunk_end = min(current_pos + self.CHUNK_MAX_SIZE, text_length)
-                
-                # Look for sentence boundary
-                if chunk_end < text_length:
-                    look_ahead = text[chunk_end:min(chunk_end + 100, text_length)]
-                    next_period = look_ahead.find('.')
-                    if next_period != -1:
-                        chunk_end = chunk_end + next_period + 1
-
-                # Extract and validate chunk
-                chunk = text[current_pos:chunk_end].strip()
-                if len(chunk) >= self.CHUNK_MIN_SIZE:
-                    chunks.append(chunk)
-                
-                # Update position
-                if chunk_end >= text_length:
-                    break
-                    
-                current_pos = chunk_end - self.OVERLAP_SIZE
-
-            return chunks
-            
-        except Exception as e:
-            logging.error(f"Error in split_into_chunks: {str(e)}")
-            return []    
-    
-    MAX_RETRIES = 3
-    RETRY_DELAY = 5
-    CHUNK_MIN_SIZE = 500
-    CHUNK_MAX_SIZE = 2000
-    OVERLAP_SIZE = 100
-    
-    CLAUDE_PROMPT = """As a content specialist, create a detailed and comprehensive summary of this lecture segment in Hebrew. This is part {chunk_number} out of {total_chunks}.
-
-<original_text>
-{transcribed_text}
-</original_text>
-
-Your task is to transform this into a clear, well-structured summary in Hebrew that:
-1. Captures EVERY piece of information from the original text
-2. Organizes the content into logical sections with clear headers
-3. Uses bullet points to break down complex ideas
-4. Maintains all references, names, and numbers  
-5. Presents information in a more readable format while preserving all details
-6. Uses clear, precise terminology
-7. Structures related points under common themes
-
-Guidelines for the summary:
-- Don't lose any information - every fact, example, and detail should be included
-- Break long explanations into concise, clear bullet points
-- Group related information under descriptive headers
-- Maintain the exact meaning of concepts
-- Keep all numerical references
-- Use proper terminology
-- Present cause-and-effect relationships clearly
-
-Format your response with:
-<improved_text>"""
-
-    def __init__(self, api_key: str, progress_tracker: ProgressTracker):
-        """Initialize with API key validation"""
-        if not api_key or not isinstance(api_key, str):
-            raise ValueError("Invalid API key provided")
-        self.client = anthropic.Client(api_key=api_key)
-        self.progress_tracker = progress_tracker
-
-    def validate_text(self, text: Any) -> str:
-        """Validate and clean text input"""
-        if not isinstance(text, str):
-            raise TypeError(f"Expected string, got {type(text)}")
-            
-        # Remove escaped newlines and replace with actual newlines
-        text = text.replace('\\n', ' ')
-        
-        # Replace multiple spaces with single space
-        text = ' '.join(text.split())
-        
-        # Clean up bullet points and formatting
-        text = text.replace('* ', '\n* ')
-        text = text.replace('•', '*')
-        
-        cleaned_text = text.strip()
-        if not cleaned_text:
-            raise ValueError("Empty text provided")
-            
-        return cleaned_text
-
-    async def process_chunk(self, chunk: str, chunk_number: int, total_chunks: int, progress: TranscriptionProgress) -> Optional[str]:
-        """Process a single chunk with comprehensive error handling"""
-        for attempt in range(1, self.MAX_RETRIES + 1):
-            try:
-                # Update progress
-                progress.current_chunk = chunk_number
-                progress.total_chunks = total_chunks
-                progress.current_action = f"Processing chunk {chunk_number}/{total_chunks}"
-                self.progress_tracker.update_progress(
-                    progress.filename,
-                    current_chunk=chunk_number,
-                    total_chunks=total_chunks,
-                    current_action=progress.current_action
-                )
-                
-                # Validate input
-                if not isinstance(chunk, str) or not chunk.strip():
-                    raise ValueError("Invalid or empty chunk provided")
-
-                # Prepare request
-                prompt = self.CLAUDE_PROMPT.format(
-                    chunk_number=chunk_number,
-                    total_chunks=total_chunks,
-                    transcribed_text=chunk
-                )
-                
-                # Make API request
-                response = await self.client.messages.create(
-                    model="claude-3-5-sonnet-20241022",
-                    max_tokens=8192,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                
-                # Get content from response
-                if not hasattr(response, 'content'):
-                    raise ValueError("Response missing 'content' attribute")
-                    
-                content = response.content[0].text if isinstance(response.content, list) else response.content
-                
-                if not isinstance(content, str):
-                    raise TypeError(f"Unexpected content type: {type(content)}")
-
-                # Extract text between improved_text tags
-                match = re.search(r'<improved_text>\s*(.*?)(?=<|$)', content, re.DOTALL | re.IGNORECASE)
-                if not match:
-                    raise ValueError("Failed to find improved_text tags in response")
-                
-                improved_text = match.group(1).strip()
-                if not improved_text:
-                    raise ValueError("Empty improved text extracted")
-                
-                # Validate final text
-                improved_text = self.validate_text(improved_text)
-                
-                # Success
-                return improved_text
-                
-            except Exception as e:
-                logging.error(f"Error processing chunk {chunk_number} (attempt {attempt}/{self.MAX_RETRIES}): {str(e)}")
-                progress.error_count += 1
-                self.progress_tracker.update_progress(
-                    progress.filename,
-                    error_count=progress.error_count
-                )
-                
-                if attempt < self.MAX_RETRIES:
-                    await asyncio.sleep(self.RETRY_DELAY)
-                    continue
-                
-                return None
-
-    def split_into_chunks(self, text: str) -> List[str]:
-        """Split text into appropriately sized chunks"""
-        try:
-            # Input validation
-            if not isinstance(text, str):
-                raise TypeError(f"Expected string, got {type(text)}")
-                
-            text = text.strip()
-            if not text:
-                raise ValueError("Empty text provided")
-
-            chunks = []
-            current_pos = 0
-            text_length = len(text)
-
-            while current_pos < text_length:
-                # Determine chunk boundaries
-                chunk_end = min(current_pos + self.CHUNK_MAX_SIZE, text_length)
-                
-                # Find sentence boundary
-                if chunk_end < text_length:
-                    look_ahead = text[chunk_end:min(chunk_end + 100, text_length)]
-                    next_period = look_ahead.find('.')
-                    if next_period != -1:
-                        chunk_end = chunk_end + next_period + 1
-
-                # Extract chunk
-                chunk = text[current_pos:chunk_end].strip()
-                
-                # Validate chunk
-                if len(chunk) >= self.CHUNK_MIN_SIZE:
-                    chunks.append(chunk)
-                
-                # Update position
-                if chunk_end >= text_length:
-                    break
-                    
-                current_pos = chunk_end - self.OVERLAP_SIZE
-
-            return chunks
-            
-        except Exception as e:
-            logging.error(f"Error in split_into_chunks: {str(e)}")
-            return []
-
-    async def process_text(self, text: str, progress: TranscriptionProgress) -> Optional[str]:
-        """Process complete text with chunking and progress tracking"""
-        try:
-            # Preprocess text
-            text = self.validate_text(text)
-            if not text:
-                raise ValueError("Empty text after preprocessing")
             
             # Split into chunks
             chunks = self.split_into_chunks(text)
@@ -1488,8 +910,20 @@ class TranscriptionOutput:
             logging.error(f"Error saving processed output: {str(e)}")
             return None
     
-    def create_full_report(self, filename: str, segments: List[Dict[str, Any]], processed_content: str) -> Optional[Path]:
-        """Create comprehensive report with both raw and processed content"""
+    def create_full_report(self, filename: str, segments: List[Dict[str, Any]], 
+                           processed_content: str, chunk_results: Dict[int, Dict[str, str]]) -> Optional[Path]:
+        """
+        Create comprehensive report with both raw and processed content, showing chunks side by side.
+        
+        Args:
+            filename (str): The file name
+            segments (List[Dict[str, Any]]): List of transcription segments
+            processed_content (str): Final processed content
+            chunk_results (Dict[int, Dict[str, str]]): Dictionary of raw and processed chunks by number
+            
+        Returns:
+            Optional[Path]: Path to the report file if successful, None otherwise
+        """
         try:
             report_path = self.output_dir / f"{filename}_report.txt"
             
@@ -1500,15 +934,36 @@ class TranscriptionOutput:
                 f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write("=" * 80 + "\n\n")
                 
+                # Write chunks side-by-side
+                if chunk_results:
+                    f.write("CHUNKS COMPARISON\n")
+                    f.write("-" * 80 + "\n\n")
+                    
+                    for chunk_num in sorted(chunk_results.keys()):
+                        chunk = chunk_results[chunk_num]
+                        f.write(f"===== CHUNK {chunk_num} =====\n\n")
+                        
+                        f.write("RAW CHUNK:\n")
+                        f.write("-" * 40 + "\n")
+                        f.write(chunk['raw'])
+                        f.write("\n\n")
+                        
+                        f.write("PROCESSED CHUNK:\n")
+                        f.write("-" * 40 + "\n")
+                        f.write(chunk['processed'])
+                        f.write("\n\n")
+                        
+                        f.write("-" * 80 + "\n\n")
+                
                 # Write raw transcription
-                f.write("RAW TRANSCRIPTION\n")
+                f.write("COMPLETE RAW TRANSCRIPTION\n")
                 f.write("-" * 80 + "\n\n")
                 for segment in segments:
                     f.write(f"[{format_time(segment['start'])} -> {format_time(segment['end'])}]\n")
                     f.write(f"{segment['text']}\n\n")
                 
                 # Write processed content
-                f.write("\nPROCESSED CONTENT\n")
+                f.write("\nCOMPLETE PROCESSED CONTENT\n")
                 f.write("-" * 80 + "\n\n")
                 f.write(processed_content)
             
@@ -1565,157 +1020,6 @@ class FileProcessor:
         self.system_state = system_state
         self.model = model
         self.text_processor = text_processor
-        self.max_retries = 3
-        self.retry_delay = 30
-        self.chunk_overlap = 0.5
-    
-    def save_raw_transcription(self, file_path: Path, segments: List[Dict[str, Any]]) -> Optional[Path]:
-        """
-        Save raw transcription with timestamps to file.
-        
-        Args:
-            file_path (Path): Original audio file path
-            segments (List[Dict[str, Any]]): List of transcription segments
-            
-        Returns:
-            Optional[Path]: Path to saved file if successful, None otherwise
-        """
-        try:
-            # Create output filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_path = self.system_state.output_dir / f"{file_path.stem}_{timestamp}_raw.txt"
-            
-            # Format and write segments
-            with open(output_path, 'w', encoding='utf-8') as f:
-                # Write header
-                f.write(f"Raw Transcription for: {file_path.name}\n")
-                f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write("-" * 80 + "\n\n")
-                
-                # Write segments with timestamps
-                for segment in segments:
-                    start_time = timedelta(seconds=int(segment['start']))
-                    end_time = timedelta(seconds=int(segment['end']))
-                    f.write(f"[{start_time} -> {end_time}]\n")
-                    f.write(f"{segment['text']}\n\n")
-            
-            logging.info(f"Saved raw transcription to {output_path}")
-            return output_path
-            
-        except Exception as e:
-            logging.error(f"Error saving raw transcription: {str(e)}")
-            return None
-
-    async def process_file(self, file_path: Path) -> bool:
-        """
-        Process a single audio file with enhanced validation and error handling.
-        Ensures raw transcription is saved even if Claude processing fails.
-        
-        Args:
-            file_path (Path): Path to the audio file
-            
-        Returns:
-            bool: True if basic transcription succeeded, False otherwise
-        """
-        try:
-            # Prepare file
-            prepared_path = await self.prepare_file(file_path)
-            if not prepared_path:
-                return False
-            
-            # Initialize progress
-            progress = self.system_state.progress_tracker.initialize_progress(file_path.name)
-            
-            try:
-                # Transcribe file
-                segments = await self.model.transcribe_file(prepared_path, progress)
-                
-                if not segments:
-                    logging.error(f"Failed to transcribe {file_path.name}")
-                    return False
-                
-                # Always save raw transcription first
-                raw_path = self.save_raw_transcription(file_path, segments)
-                if not raw_path:
-                    logging.error("Failed to save raw transcription")
-                
-                # Try to process with Claude
-                try:
-                    # Combine segments into text
-                    full_text = "\n".join(segment['text'] for segment in segments)
-                    
-                    # Process with Claude
-                    processed_text = await self.text_processor.process_text(full_text, progress)
-                    
-                    if processed_text:
-                        # Save processed version
-                        processed_path = self.system_state.output_dir / f"{file_path.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_processed.txt"
-                        with open(processed_path, 'w', encoding='utf-8') as f:
-                            f.write(processed_text)
-                        logging.info(f"Saved processed transcription to {processed_path}")
-                    else:
-                        logging.warning("Claude processing failed, only raw transcription saved")
-                
-                except Exception as claude_error:
-                    logging.error(f"Error in Claude processing: {str(claude_error)}")
-                    logging.info("Continuing with raw transcription only")
-                
-                # Create detailed report
-                try:
-                    report_path = self.system_state.output_dir / f"{file_path.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_report.txt"
-                    with open(report_path, 'w', encoding='utf-8') as f:
-                        # Write header
-                        f.write("=" * 80 + "\n")
-                        f.write(f"Transcription Report for: {file_path.name}\n")
-                        f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                        f.write("=" * 80 + "\n\n")
-                        
-                        # Write raw transcription
-                        f.write("RAW TRANSCRIPTION\n")
-                        f.write("-" * 80 + "\n\n")
-                        for segment in segments:
-                            start_time = timedelta(seconds=int(segment['start']))
-                            end_time = timedelta(seconds=int(segment['end']))
-                            f.write(f"[{start_time} -> {end_time}]\n")
-                            f.write(f"{segment['text']}\n\n")
-                        
-                        # Write processed content if available
-                        if processed_text:
-                            f.write("\nPROCESSED CONTENT\n")
-                            f.write("-" * 80 + "\n\n")
-                            f.write(processed_text)
-                        
-                        # Write processing statistics
-                        f.write("\n\nPROCESSING STATISTICS\n")
-                        f.write("-" * 80 + "\n")
-                        f.write(f"Total segments: {len(segments)}\n")
-                        f.write(f"Total duration: {timedelta(seconds=int(segments[-1]['end']))}\n")
-                        f.write(f"Claude processing: {'Successful' if processed_text else 'Failed'}\n")
-                    
-                    logging.info(f"Created detailed report at {report_path}")
-                    
-                except Exception as report_error:
-                    logging.error(f"Error creating report: {str(report_error)}")
-                
-                return True
-                
-            finally:
-                # Cleanup
-                if prepared_path != file_path:
-                    try:
-                        prepared_path.unlink()
-                    except Exception as e:
-                        logging.error(f"Error cleaning up temporary file: {str(e)}")
-            
-        except Exception as e:
-            logging.error(f"Error processing file {file_path}: {str(e)}")
-            return False
-            
-    def __init__(self, system_state: SystemState, model: EnhancedWhisperModel, text_processor: TextProcessor):
-        self.system_state = system_state
-        self.model = model
-        self.text_processor = text_processor
-        
         self.max_retries = 3
         self.retry_delay = 30
         self.chunk_overlap = 0.5
@@ -1778,67 +1082,53 @@ class FileProcessor:
             logging.error(f"Error preparing file {file_path}: {str(e)}")
             return None
     
-    def __init__(self, system_state: SystemState, model: EnhancedWhisperModel, text_processor: TextProcessor):
+    async def transcribe_with_progress(
+        self,
+        file_path: Path,
+        progress: TranscriptionProgress,
+        start_position: float = 0,
+        existing_segments: List[Dict[str, Any]] = None
+    ) -> Optional[List[Dict[str, Any]]]:
         """
-        Initialize the FileProcessor.
+        Transcribe a file with progress tracking and checkpointing.
         
         Args:
-            system_state (SystemState): Global system state and configuration.
-            model (EnhancedWhisperModel): Enhanced Whisper model for transcription.
-            text_processor (TextProcessor): Text processor for chunking and correction.
-        """
-        self.system_state = system_state
-        self.model = model
-        self.text_processor = text_processor
-        
-        # Processing settings
-        self.max_retries = 3
-        self.retry_delay = 30
-        self.chunk_overlap = 0.5  # seconds
-    
-    async def prepare_file(self, file_path: Path) -> Optional[Path]:
-        """
-        Prepare the file for processing, converting it to WAV format if necessary.
-        
-        Args:
-            file_path (Path): Path to the file to prepare.
+            file_path (Path): Path to the audio file to transcribe.
+            progress (TranscriptionProgress): Progress tracking object.
+            start_position (float, optional): Starting position in seconds. Defaults to 0.
+            existing_segments (List[Dict[str, Any]], optional): Existing segments. Defaults to None.
         
         Returns:
-            Optional[Path]: Path to the prepared file if successful, None otherwise.
+            Optional[List[Dict[str, Any]]]: List of transcribed segments if successful, None otherwise.
         """
         try:
-            # Check if file exists
-            if not file_path.exists():
-                logging.error(f"File not found: {file_path}")
+            # Initialize segments with existing segments or an empty list
+            segments = existing_segments or []
+            
+            # Transcribe
+            new_segments = await self.model.transcribe_file(file_path, progress)
+            if not new_segments:
                 return None
             
-            # Validate file format
-            if not self.system_state.file_validator.is_supported_file(file_path):
-                logging.error(f"Unsupported file format: {file_path}")
-                return None
+            # Filter and combine segments
+            for segment in new_segments:
+                if segment['start'] >= start_position:
+                    segments.append(segment)
             
-            # Get file info
-            audio_info = self.system_state.file_validator.get_audio_info(file_path)
-            if not audio_info:
-                logging.error(f"Could not get audio info for {file_path}")
-                return None
+            # Sort segments by start time
+            segments.sort(key=lambda x: x['start'])
             
-            # Convert to WAV if needed
-            if file_path.suffix.lower() != '.wav':
-                logging.info(f"Converting {file_path} to WAV format")
-                wav_path = self.system_state.file_validator.convert_to_wav(
-                    file_path,
-                    self.system_state.temp_dir
-                )
-                if not wav_path:
-                    logging.error(f"Failed to convert {file_path} to WAV")
-                    return None
-                return wav_path
+            # Save checkpoint
+            self.system_state.checkpoint_manager.save_checkpoint(
+                progress.filename,
+                segments,
+                progress.current_position
+            )
             
-            return file_path
+            return segments
             
         except Exception as e:
-            logging.error(f"Error preparing file {file_path}: {str(e)}")
+            logging.error(f"Error in transcribe_with_progress: {str(e)}")
             return None
     
     async def process_file(self, file_path: Path) -> bool:
@@ -1931,11 +1221,15 @@ class FileProcessor:
                 processed_text
             )
             
-            # Create full report
+            # Get chunk results for the report
+            chunk_results = self.text_processor.chunk_results.get(original_filename, {})
+            
+            # Create full report with chunk comparison
             report_path = self.system_state.output_manager.create_full_report(
                 original_filename,
                 segments,
-                processed_text
+                processed_text,
+                chunk_results
             )
             
             # Mark as completed
@@ -1951,263 +1245,7 @@ class FileProcessor:
         except Exception as e:
             logging.error(f"Error processing file {original_filename}: {str(e)}")
             return False
-    
-    async def transcribe_with_progress(
-        self,
-        file_path: Path,
-        progress: TranscriptionProgress,
-        start_position: float = 0,
-        existing_segments: List[Dict[str, Any]] = None
-    ) -> Optional[List[Dict[str, Any]]]:
-        """
-        Transcribe a file with progress tracking and checkpointing.
-        
-        Args:
-            file_path (Path): Path to the audio file to transcribe.
-            progress (TranscriptionProgress): Progress tracking object.
-            start_position (float, optional): Starting position in seconds. Defaults to 0.
-            existing_segments (List[Dict[str, Any]], optional): Existing segments. Defaults to None.
-        
-        Returns:
-            Optional[List[Dict[str, Any]]]: List of transcribed segments if successful, None otherwise.
-        """
-        try:
-            # Initialize segments with existing segments or an empty list
-            segments = existing_segments or []
-            
-            # Transcribe
-            new_segments = await self.model.transcribe_file(file_path, progress)
-            if not new_segments:
-                return None
-            
-            # Filter and combine segments
-            for segment in new_segments:
-                if segment['start'] >= start_position:
-                    segments.append(segment)
-            
-            # Sort segments by start time
-            segments.sort(key=lambda x: x['start'])
-            
-            # Save checkpoint
-            self.system_state.checkpoint_manager.save_checkpoint(
-                progress.filename,
-                segments,
-                progress.current_position
-            )
-            
-            return segments
-            
-        except Exception as e:
-            logging.error(f"Error in transcribe_with_progress: {str(e)}")
-            return None
-            """Handles file processing workflow and state management"""
-    
-    def __init__(self, system_state: SystemState, model: EnhancedWhisperModel, text_processor: TextProcessor):
-        self.system_state = system_state
-        self.model = model
-        self.text_processor = text_processor
-        
-        # Processing settings
-        self.max_retries = 3
-        self.retry_delay = 30
-        self.chunk_overlap = 0.5  # seconds
-    
-    async def prepare_file(self, file_path: Path) -> Optional[Path]:
-        """Prepare file for processing, converting if necessary"""
-        try:
-            # Check if file exists
-            if not file_path.exists():
-                logging.error(f"File not found: {file_path}")
-                return None
-            
-            # Validate file format
-            if not self.system_state.file_validator.is_supported_file(file_path):
-                logging.error(f"Unsupported file format: {file_path}")
-                return None
-            
-            # Get file info
-            audio_info = self.system_state.file_validator.get_audio_info(file_path)
-            if not audio_info:
-                logging.error(f"Could not get audio info for {file_path}")
-                return None
-            
-            # Convert to WAV if needed
-            if file_path.suffix.lower() != '.wav':
-                logging.info(f"Converting {file_path} to WAV format")
-                wav_path = self.system_state.file_validator.convert_to_wav(
-                    file_path,
-                    self.system_state.temp_dir
-                )
-                if not wav_path:
-                    logging.error(f"Failed to convert {file_path} to WAV")
-                    return None
-                return wav_path
-            
-            return file_path
-            
-        except Exception as e:
-            logging.error(f"Error preparing file {file_path}: {str(e)}")
-            return None
-    
-async def process_file(self, file_path: Path) -> bool:
-    """
-    Process a single file with progress tracking and error handling.
-    
-    Args:
-        file_path (Path): Path to the file to process.
-    
-    Returns:
-        bool: True if processing is successful, False otherwise.
-    """
-    original_filename = file_path.name
-    
-    try:
-        # Check if file is already completed
-        if self.system_state.progress_tracker.is_completed(original_filename):
-            logging.info(f"Skipping completed file: {original_filename}")
-            return True
-        
-        # Initialize progress tracking
-        progress = self.system_state.progress_tracker.initialize_progress(original_filename)
-        progress.current_action = "Preparing file"
-        self.system_state.progress_tracker.update_progress(
-            original_filename,
-            current_action=progress.current_action
-        )
-        
-        # Prepare file
-        prepared_path = await self.prepare_file(file_path)
-        if not prepared_path:
-            return False
-        
-        # Load checkpoint if exists
-        checkpoint = self.system_state.checkpoint_manager.load_checkpoint(original_filename)
-        start_position = checkpoint['last_position'] if checkpoint else 0
-        existing_segments = checkpoint['segments'] if checkpoint else []
-        
-        # Update progress
-        progress.current_action = "Transcribing audio"
-        progress.current_position = start_position
-        self.system_state.progress_tracker.update_progress(
-            original_filename,
-            current_action=progress.current_action,
-            current_position=start_position
-        )
-        
-        # Transcribe file
-        segments = await self.transcribe_with_progress(
-            prepared_path,
-            progress,
-            start_position,
-            existing_segments
-        )
-        
-        if not segments:
-            return False
-        
-        # Process transcribed text
-        progress.current_action = "Processing transcription"
-        self.system_state.progress_tracker.update_progress(
-            original_filename,
-            current_action=progress.current_action
-        )
-        
-        # Combine segments into text
-        full_text = "\n".join(segment['text'] for segment in segments)
-        
-        # Process text
-        processed_text = await self.text_processor.process_text(full_text, progress)
-        if not processed_text:
-            return False
-        
-        # Save outputs
-        progress.current_action = "Saving outputs"
-        self.system_state.progress_tracker.update_progress(
-            original_filename,
-            current_action=progress.current_action
-        )
-        
-        # Save raw transcription
-        raw_path = self.system_state.output_manager.save_raw_transcription(
-            original_filename,
-            segments
-        )
-        
-        # Save processed output
-        processed_path = self.system_state.output_manager.save_processed_output(
-            original_filename,
-            processed_text
-        )
-        
-        # Create full report
-        report_path = self.system_state.output_manager.create_full_report(
-            original_filename,
-            segments,
-            processed_text
-        )
-        
-        # Mark as completed
-        self.system_state.progress_tracker.mark_completed(original_filename)
-        self.system_state.checkpoint_manager.delete_checkpoint(original_filename)
-        
-        # Clean up
-        if prepared_path != file_path:
-            prepared_path.unlink()
-        
-        return True
-        
-    except Exception as e:
-        logging.error(f"Error processing file {original_filename}: {str(e)}")
-        return False
-    
-async def transcribe_with_progress(
-        self,
-        file_path: Path,
-        progress: TranscriptionProgress,
-        start_position: float = 0,
-        existing_segments: List[Dict[str, Any]] = None
-    ) -> Optional[List[Dict[str, Any]]]:
-        """
-        Transcribe a file with progress tracking and checkpointing.
-        
-        Args:
-            file_path (Path): Path to the audio file to transcribe.
-            progress (TranscriptionProgress): Progress tracking object.
-            start_position (float, optional): Starting position in seconds. Defaults to 0.
-            existing_segments (List[Dict[str, Any]], optional): Existing segments. Defaults to None.
-        
-        Returns:
-            Optional[List[Dict[str, Any]]]: List of transcribed segments if successful, None otherwise.
-        """
-        try:
-            # Initialize segments with existing segments or an empty list
-            segments = existing_segments or []
-            
-            # Transcribe
-            new_segments = await self.model.transcribe_file(file_path, progress)
-            if not new_segments:
-                return None
-            
-            # Filter and combine segments
-            for segment in new_segments:
-                if segment['start'] >= start_position:
-                    segments.append(segment)
-            
-            # Sort segments by start time
-            segments.sort(key=lambda x: x['start'])
-            
-            # Save checkpoint
-            self.system_state.checkpoint_manager.save_checkpoint(
-                progress.filename,
-                segments,
-                progress.current_position
-            )
-            
-            return segments
-            
-        except Exception as e:
-            logging.error(f"Error in transcribe_with_progress: {str(e)}")
-            return None
+
 class ProcessManager:
     """Manages concurrent file processing and resource allocation"""
     
@@ -2300,7 +1338,7 @@ class ApplicationConfig:
     claude_api_key: str = ""
     
     # Model configuration
-    model_name: str = "ivrit-ai/faster-whisper-v2-d4"
+    model_name: str = "ivrit-ai/whisper-large-v3-turbo-ct2"
     compute_type: str = "float16"
     
     # Processing configuration  
@@ -2309,6 +1347,14 @@ class ApplicationConfig:
     overlap_size: int = 100
     max_retries: int = 3
     retry_delay: int = 30
+    
+    # Language configuration
+    source_language: str = "he"  # Hebrew
+    target_language: str = "he"  # Hebrew
+    
+    # Claude configuration
+    claude_model: str = "claude-3-5-sonnet-20241022"
+    claude_max_tokens: int = 8192
     
     def __post_init__(self):
         """Validate configuration after initialization"""
@@ -2337,14 +1383,6 @@ class ApplicationConfig:
             # Create input directory if it doesn't exist
             Path(self.input_dir).mkdir(exist_ok=True)
             logging.info(f"Using default input directory: {self.input_dir}")
-
-            # Language configuration
-    source_language: str = "he"  # Hebrew
-    target_language: str = "he"  # Hebrew
-    
-    # Claude configuration
-    claude_model: str = "claude-3-5-sonnet-20241022"
-    claude_max_tokens: int = 8192
 
 class TranscriptionSystem:
     """Main transcription system orchestrator"""
@@ -2473,10 +1511,12 @@ async def main():
         api_key = input("Enter the Claude API key (leave blank to skip text processing): ")
         
         # Load configuration
+        model_name = input("Enter Whisper model name (leave blank for default 'ivrit-ai/whisper-large-v3-turbo-ct2'): ").strip()
         config = ApplicationConfig(
-            input_dir=input_dir if input_dir else "",  # Empty string will trigger default in __post_init__
-            claude_api_key=api_key
-        )
+            input_dir=input_dir if input_dir else "",
+            claude_api_key=api_key,
+            model_name=model_name if model_name else "ivrit-ai/whisper-large-v3-turbo-ct2"
+)
         
         # Prompt user for custom Claude prompt (optional)
         if api_key:
@@ -2515,5 +1555,3 @@ if __name__ == "__main__":
     except Exception as e:
         console.print(f"[bold red]Fatal error: {str(e)}[/bold red]")
         sys.exit(1)
-
-    
